@@ -13,8 +13,8 @@ import type { User } from 'firebase/auth';
 import { doc, getDoc, onSnapshot, runTransaction, serverTimestamp } from 'firebase/firestore';
 import { auth, db, google } from './lib/firebase';
 import { AppCtx, DEFAULT_SETTINGS, useApp } from './lib/ctx';
-import type { Profile, Settings } from './lib/ctx';
-import { OWNER_UID, randomFriendId } from './lib/util';
+import type { Pending, Profile, Settings } from './lib/ctx';
+import { FID_RE, OWNER_UID, randomFriendId } from './lib/util';
 import Icon, { Logo } from './components/Icon';
 import Transfer from './views/Transfer';
 import Friends from './views/Friends';
@@ -30,6 +30,17 @@ interface Toast {
 }
 
 const GUEST_PROFILE: Profile = { friendId: '', displayName: 'Guest' };
+
+/** Reads ?room= / ?friend= once at load (from a scanned QR or shared link), then cleans the URL. */
+function readLink(): Pending {
+  const p = new URLSearchParams(window.location.search);
+  const room = p.get('room') || '';
+  const friend = (p.get('friend') || '').toUpperCase();
+  const out: Pending = { room: /^\d{6}$/.test(room) ? room : '', friend: FID_RE.test(friend) ? friend : '' };
+  if (p.has('room') || p.has('friend')) window.history.replaceState(null, '', window.location.pathname);
+  return out;
+}
+const INITIAL_LINK = readLink();
 
 /** Allocates an 8-char friend ID. friendIds docs are create-only, so a taken ID is detected first and retried. */
 async function createProfile(user: User): Promise<Profile> {
@@ -78,8 +89,11 @@ export default function App() {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [profileErr, setProfileErr] = useState('');
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
-  const [view, setView] = useState<View>('transfer');
+  const [view, setView] = useState<View>(INITIAL_LINK.friend ? 'friends' : 'transfer');
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [pending, setPending] = useState<Pending>(INITIAL_LINK);
+
+  const clearPending = useCallback((k: keyof Pending) => setPending((p) => ({ ...p, [k]: '' })), []);
 
   const notify = useCallback((msg: string, kind: 'ok' | 'err' = 'ok') => {
     const id = Date.now() + Math.random();
@@ -151,7 +165,6 @@ export default function App() {
     } catch (e: any) {
       const c = e?.code as string | undefined;
       if (c === 'auth/credential-already-in-use') {
-        // That Google account already exists: switch to it (guest session is dropped).
         const cred = GoogleAuthProvider.credentialFromError(e);
         if (cred) {
           try {
@@ -195,35 +208,80 @@ export default function App() {
 
   // ---------- Home ----------
   if (user === null) {
+    const guestPoints = [
+      'Rooms: direct browser-to-browser, joined by a 6-digit code or a QR scan',
+      'Queue several files at once, with live progress on each',
+      'Drops: text, links and files up to 522 KiB, one-tap copy on the other end',
+      'No account, no email',
+    ];
+    const memberPoints = [
+      'Chat inside a room',
+      'Friends by 8-character ID or QR, plus room invites',
+      'Drops to friends and to your own other devices',
+      'Send feedback and report abuse',
+    ];
     return (
       <>
-        {settings.maintenanceBanner && <div className="banner">{settings.maintenanceBanner}</div>}
-        <div className="gate">
-          <div className="gate-in">
-            <div className="brand big">
-              <Logo size={32} />
-              <span>AyDrop</span>
-            </div>
-            <h1>Send a file to another device.</h1>
-            <p>Open a room and transfer straight between two browsers, or leave a drop that waits for up to 24 hours.</p>
-            <div className="home-actions">
-              <button className="btn light" onClick={() => signInGoogle()}>
-                Continue with Google
-              </button>
-              <div className="home-note">Chat, friends, invites, feedback and drops to your other devices.</div>
-              <button className="btn dark" onClick={continueAsGuest}>
-                Continue as Guest
-              </button>
-              <div className="home-note">Rooms and file transfer, no account. Chat and friends need Google sign-in.</div>
-            </div>
-            <dl className="facts">
-              <dt>Room</dt>
-              <dd>Six-digit code, direct WebRTC transfer.</dd>
-              <dt>Drop</dt>
-              <dd>Text or a file up to 522 KiB. SHA-256 checked on arrival.</dd>
-              <dt>Friends</dt>
-              <dd>Add someone by their 8-character ID. Members only.</dd>
-            </dl>
+        {settings.maintenanceBanner && <div className="banner" style={{ margin: 16 }}>{settings.maintenanceBanner}</div>}
+        <div className="home">
+          <div className="home-bg" aria-hidden="true" />
+          <div className="home-wrap">
+            <header className="home-head">
+              <div className="brand">
+                <Logo size={28} />
+                <span>AyDrop</span>
+              </div>
+            </header>
+
+            <section className="home-hero">
+              <h1>Get it onto the other device.</h1>
+              <p className="lead">Files, links and text. Straight between browsers in a room, or parked in a drop for up to 24 hours.</p>
+              {pending.room && <div className="home-pending">Room {pending.room} is waiting. Continue to join it.</div>}
+              {pending.friend && <div className="home-pending">Friend link detected. Sign in with Google to add them.</div>}
+              <div className="home-actions">
+                <button className="btn light" onClick={() => signInGoogle()}>
+                  Continue with Google
+                </button>
+                <div className="home-note">Everything below, plus chat and friends.</div>
+                <button className="btn dark" onClick={continueAsGuest}>
+                  Continue as Guest
+                </button>
+                <div className="home-note">Transfers only. You can sign in later without losing your room.</div>
+              </div>
+            </section>
+
+            <section className="home-cards">
+              <div className="glass feat">
+                <div className="feat-h">
+                  <b>Guest</b>
+                  <span className="badge">No account</span>
+                </div>
+                <ul>
+                  {guestPoints.map((t) => (
+                    <li key={t}>
+                      <Icon name="check" />
+                      <span>{t}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              <div className="glass feat dim">
+                <div className="feat-h">
+                  <b>Member</b>
+                  <span className="badge">Google sign-in</span>
+                </div>
+                <ul>
+                  {memberPoints.map((t) => (
+                    <li key={t}>
+                      <Icon name="check" />
+                      <span>{t}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </section>
+
+            <footer className="home-foot">Drops are capped at 522 KiB and expire after 24 hours. Room transfers go directly between the two browsers.</footer>
           </div>
         </div>
         {toastEls}
@@ -258,7 +316,7 @@ export default function App() {
   if (isAdmin) tabs.push({ id: 'admin', label: 'Admin', icon: 'admin' });
 
   return (
-    <AppCtx.Provider value={{ user, profile, settings, isAdmin, isGuest, notify, signInGoogle }}>
+    <AppCtx.Provider value={{ user, profile, settings, isAdmin, isGuest, notify, signInGoogle, pending, clearPending }}>
       <div className="app">
         <aside className="rail">
           <div className="brand">
@@ -296,7 +354,7 @@ export default function App() {
             <Transfer />
           </section>
           <section hidden={view !== 'friends'}>
-            {isGuest ? <MemberGate what="Friends" why="Adding friends and inviting them to rooms needs an account. Sign in with Google to get your friend ID." /> : <Friends />}
+            {isGuest ? <MemberGate what="Friends" why="Adding friends and inviting them to rooms needs an account. Sign in with Google to get your friend ID and QR code." /> : <Friends />}
           </section>
           <section hidden={view !== 'feedback'}>
             {isGuest ? <MemberGate what="Feedback" why="Feedback is tied to an account so reports can be followed up and abuse can be traced. Sign in with Google to send one." /> : <Feedback />}
