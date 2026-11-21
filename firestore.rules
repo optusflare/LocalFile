@@ -1,0 +1,190 @@
+rules_version = '2';
+
+// SET THIS to the owner's Firebase Auth UID before deploying (Firebase console > Authentication > Users).
+// Do not commit a real UID if the repo is public and you prefer to keep it private; deploy from a local copy.
+function ownerUid() { return 'REPLACE_WITH_OWNER_UID'; }
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function isAdmin() { return signedIn() && ownerUid() != 'REPLACE_WITH_OWNER_UID' && request.auth.uid == ownerUid(); }
+    function isStr(v, min, max) { return v is string && v.size() >= min && v.size() <= max; }
+    function onlyKeys(keys) { return request.resource.data.keys().hasOnly(keys); }
+
+    // ---- Public, non-secret app settings (never put the Turnstile secret here) ----
+    match /config/appSettings {
+      allow read: if true;
+      allow write: if isAdmin()
+        && onlyKeys(['workerUrl', 'turnstileSiteKey', 'maintenanceBanner', 'blockedExtensions', 'updatedAt'])
+        && isStr(request.resource.data.workerUrl, 0, 200)
+        && isStr(request.resource.data.turnstileSiteKey, 0, 100)
+        && isStr(request.resource.data.maintenanceBanner, 0, 300)
+        && request.resource.data.blockedExtensions is list
+        && request.resource.data.blockedExtensions.size() <= 50;
+    }
+
+    // ---- Profiles: private to the owner. Friend lookup uses friendIds/{id} (uid only). ----
+    match /users/{uid} {
+      allow read: if signedIn() && request.auth.uid == uid;
+      allow create: if signedIn() && request.auth.uid == uid
+        && onlyKeys(['friendId', 'displayName', 'createdAt'])
+        && request.resource.data.friendId.matches('^[A-HJ-NP-Z2-9]{8}$')
+        && isStr(request.resource.data.displayName, 0, 60);
+      allow update: if signedIn() && request.auth.uid == uid
+        && request.resource.data.friendId == resource.data.friendId
+        && onlyKeys(['friendId', 'displayName', 'createdAt']);
+      allow delete: if false;
+    }
+
+    // Create-only: a collision means create is denied (doc exists), so the client retries with a new ID.
+    match /friendIds/{friendId} {
+      allow get: if signedIn() && friendId.matches('^[A-HJ-NP-Z2-9]{8}$');
+      allow list: if false;
+      allow create: if signedIn() && friendId.matches('^[A-HJ-NP-Z2-9]{8}$')
+        && onlyKeys(['uid', 'displayName'])
+        && request.resource.data.uid == request.auth.uid
+        && isStr(request.resource.data.displayName, 0, 60);
+      allow update, delete: if false;
+    }
+
+    // Request id convention: {fromUid}_{toUid}
+    match /friendRequests/{id} {
+      allow read: if signedIn() && (resource.data.from == request.auth.uid || resource.data.to == request.auth.uid);
+      allow create: if signedIn() && onlyKeys(['from', 'to', 'status', 'createdAt'])
+        && request.resource.data.from == request.auth.uid
+        && request.resource.data.to is string && request.resource.data.to != request.auth.uid
+        && id == request.auth.uid + '_' + request.resource.data.to
+        && request.resource.data.status == 'pending'
+        && request.resource.data.createdAt == request.time;
+      allow update: if signedIn() && resource.data.to == request.auth.uid
+        && resource.data.status == 'pending'
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])
+        && request.resource.data.status in ['accepted', 'declined'];
+      allow delete: if signedIn() && (resource.data.from == request.auth.uid || resource.data.to == request.auth.uid);
+    }
+
+    // Friendship id == the accepted request id; only creatable from an accepted request.
+    match /friendships/{id} {
+      allow read: if signedIn() && request.auth.uid in resource.data.members;
+      allow create: if signedIn() && onlyKeys(['members', 'createdAt'])
+        && request.resource.data.members.size() == 2
+        && request.auth.uid in request.resource.data.members
+        && get(/databases/$(database)/documents/friendRequests/$(id)).data.status == 'accepted'
+        && get(/databases/$(database)/documents/friendRequests/$(id)).data.to == request.auth.uid;
+      allow delete: if signedIn() && request.auth.uid in resource.data.members;
+      allow update: if false;
+    }
+
+    // ---- Room signaling. Codes are low-entropy; this is signaling only, never file data. ----
+    match /rooms/{code} {
+      function notExpired() { return resource.data.expiresAt > request.time; }
+      function isParticipant(r) { return signedIn() && (r.data.hostUid == request.auth.uid || r.data.guestUid == request.auth.uid); }
+
+      allow create: if signedIn() && code.matches('^[0-9]{6}$')
+        && onlyKeys(['hostUid', 'guestUid', 'offer', 'answer', 'createdAt', 'expiresAt'])
+        && request.resource.data.hostUid == request.auth.uid
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.expiresAt > request.time
+        && request.resource.data.expiresAt <= request.time + duration.value(2, 'h')
+        && (!('offer' in request.resource.data) || isStr(request.resource.data.offer, 0, 20000));
+      allow get: if signedIn() && notExpired();
+      allow list: if false;
+      // Host updates offer; a guest may claim an empty guest slot once and write the answer.
+      allow update: if signedIn() && notExpired() && onlyKeys(['hostUid', 'guestUid', 'offer', 'answer', 'createdAt', 'expiresAt'])
+        && request.resource.data.hostUid == resource.data.hostUid
+        && request.resource.data.expiresAt == resource.data.expiresAt
+        && (resource.data.hostUid == request.auth.uid
+            || resource.data.guestUid == request.auth.uid
+            || (!('guestUid' in resource.data) && request.resource.data.guestUid == request.auth.uid))
+        && (!('answer' in request.resource.data) || isStr(request.resource.data.answer, 0, 20000));
+      allow delete: if signedIn() && resource.data.hostUid == request.auth.uid;
+
+      match /candidates/{cid} {
+        function room() { return get(/databases/$(database)/documents/rooms/$(code)); }
+        allow read: if isParticipant(room()) && room().data.expiresAt > request.time;
+        allow create: if isParticipant(room()) && room().data.expiresAt > request.time
+          && onlyKeys(['from', 'candidate', 'createdAt'])
+          && request.resource.data.from == request.auth.uid
+          && isStr(request.resource.data.candidate, 1, 2000);
+        allow update: if false;
+        allow delete: if isParticipant(room());
+      }
+
+      match /messages/{mid} {
+        function room() { return get(/databases/$(database)/documents/rooms/$(code)); }
+        allow read: if isParticipant(room()) && room().data.expiresAt > request.time;
+        allow create: if isParticipant(room()) && room().data.expiresAt > request.time
+          && onlyKeys(['from', 'text', 'createdAt', 'expiresAt'])
+          && request.resource.data.from == request.auth.uid
+          && isStr(request.resource.data.text, 1, 500)
+          && request.resource.data.createdAt == request.time
+          && request.resource.data.expiresAt == room().data.expiresAt;
+        allow update: if false;
+        allow delete: if isParticipant(room());
+      }
+    }
+
+    match /invites/{id} {
+      allow read: if signedIn() && (resource.data.from == request.auth.uid || resource.data.to == request.auth.uid);
+      allow create: if signedIn() && onlyKeys(['from', 'to', 'roomCode', 'createdAt', 'expiresAt'])
+        && request.resource.data.from == request.auth.uid
+        && request.resource.data.roomCode.matches('^[0-9]{6}$')
+        && request.resource.data.expiresAt <= request.time + duration.value(2, 'h')
+        && (exists(/databases/$(database)/documents/friendships/$(request.auth.uid + '_' + request.resource.data.to))
+            || exists(/databases/$(database)/documents/friendships/$(request.resource.data.to + '_' + request.auth.uid)));
+      allow delete: if signedIn() && (resource.data.from == request.auth.uid || resource.data.to == request.auth.uid);
+      allow update: if false;
+    }
+
+    // ---- Async Drop. `data` is base64; 712704 chars ~= (700 KiB - 4 KiB metadata reserve), see src/lib/limits.ts ----
+    match /drops/{id} {
+      allow read: if signedIn() && resource.data.expiresAt > request.time
+        && (resource.data.from == request.auth.uid || resource.data.to == request.auth.uid);
+      allow create: if signedIn() && onlyKeys(['from', 'to', 'name', 'mime', 'size', 'sha256', 'data', 'kind', 'createdAt', 'expiresAt'])
+        && request.resource.data.from == request.auth.uid
+        && isStr(request.resource.data.to, 1, 128)
+        && isStr(request.resource.data.name, 0, 200)
+        && isStr(request.resource.data.mime, 0, 100)
+        && request.resource.data.kind in ['file', 'text']
+        && request.resource.data.size is int && request.resource.data.size >= 0 && request.resource.data.size <= 534528
+        && isStr(request.resource.data.sha256, 64, 64)
+        && isStr(request.resource.data.data, 0, 712704)
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.expiresAt <= request.time + duration.value(24, 'h');
+      allow delete: if signedIn() && (resource.data.from == request.auth.uid || resource.data.to == request.auth.uid);
+      allow update: if false;
+    }
+
+    // ---- Feedback: submitter can create/read own; owner reads/deletes all ----
+    match /feedback/{id} {
+      allow create: if signedIn() && onlyKeys(['uid', 'category', 'message', 'createdAt'])
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.category in ['bug', 'idea', 'abuse', 'other']
+        && isStr(request.resource.data.message, 5, 2000)
+        && request.resource.data.createdAt == request.time;
+      allow read: if signedIn() && (resource.data.uid == request.auth.uid || isAdmin());
+      allow delete: if isAdmin();
+      allow update: if false;
+    }
+
+    // ---- Transfer metadata only (never file contents) ----
+    match /transfers/{id} {
+      allow create: if signedIn() && onlyKeys(['uid', 'mode', 'size', 'ext', 'integrity', 'createdAt'])
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.mode in ['p2p', 'async', 'local']
+        && request.resource.data.size is int && request.resource.data.size >= 0
+        && isStr(request.resource.data.ext, 0, 12)
+        && request.resource.data.integrity in ['verified', 'mismatch', 'unchecked']
+        && request.resource.data.createdAt == request.time;
+      allow read: if signedIn() && (resource.data.uid == request.auth.uid || isAdmin());
+      allow update, delete: if false;
+    }
+
+    // ---- Worker security alerts: clients can never write; only the owner reads ----
+    match /securityAlerts/{id} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+  }
+}
