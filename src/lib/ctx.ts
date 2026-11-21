@@ -20,6 +20,11 @@ export interface Profile {
   friendId: string;
   displayName: string;
 }
+/** Codes that arrived through a scanned QR / shared link (?room=123456 or ?friend=ABCDEFGH). */
+export interface Pending {
+  room: string;
+  friend: string;
+}
 export interface Ctx {
   user: User;
   profile: Profile;
@@ -30,6 +35,8 @@ export interface Ctx {
   notify: (msg: string, kind?: 'ok' | 'err') => void;
   /** Upgrades a guest to a Google account (keeps the same uid), or signs in normally */
   signInGoogle: () => void;
+  pending: Pending;
+  clearPending: (k: keyof Pending) => void;
 }
 export const AppCtx = createContext<Ctx | null>(null);
 export function useApp(): Ctx {
