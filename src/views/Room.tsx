@@ -4,6 +4,7 @@ import { db } from '../lib/firebase';
 import { useApp } from '../lib/ctx';
 import { useTurnstile } from '../components/Turnstile';
 import Icon from '../components/Icon';
+import { QRBox, ScanDialog, parseRoomCode, roomLink } from '../components/QR';
 import { MAX_P2P_BYTES, extOf, fmtSize, isBlocked, labelOf, logTransfer, randomRoomCode, saveBlob, sha256Hex } from '../lib/util';
 
 type Status = 'idle' | 'waiting' | 'connecting' | 'connected' | 'closed';
@@ -18,7 +19,7 @@ interface Item {
   name: string;
   size: number;
   done: number;
-  state: 'active' | 'verified' | 'mismatch' | 'sent' | 'rejected';
+  state: 'queued' | 'active' | 'verified' | 'mismatch' | 'sent' | 'rejected';
   blob?: Blob;
 }
 interface Invite {
@@ -34,13 +35,24 @@ const STATUS_TEXT: Record<Status, string> = {
   connected: 'Connected',
   closed: 'Disconnected',
 };
+const STATE_TEXT: Record<Item['state'], string> = {
+  queued: 'Queued',
+  active: 'In progress',
+  verified: 'Verified',
+  mismatch: 'Checksum mismatch',
+  sent: 'Sent',
+  rejected: 'Stopped',
+};
 
 export default function Room() {
-  const { user, settings, notify, isGuest, signInGoogle } = useApp();
+  const { user, settings, notify, isGuest, signInGoogle, pending, clearPending } = useApp();
   const human = useTurnstile(settings);
   const [status, setStatus] = useState<Status>('idle');
   const [code, setCode] = useState('');
   const [join, setJoin] = useState('');
+  const [autoJoin, setAutoJoin] = useState(false);
+  const [scan, setScan] = useState(false);
+  const [showQr, setShowQr] = useState(false);
   const [expires, setExpires] = useState<Timestamp | null>(null);
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [text, setText] = useState('');
@@ -60,7 +72,8 @@ export default function Room() {
   const roomExp = useRef<Timestamp | null>(null);
   const codeRef = useRef('');
   const nextId = useRef(1);
-  const abortSend = useRef(false);
+  const abortIds = useRef<Set<number>>(new Set());
+  const sendChain = useRef<Promise<void>>(Promise.resolve());
   const blockedRef = useRef<string[]>([]);
   blockedRef.current = settings.blockedExtensions;
 
@@ -75,6 +88,7 @@ export default function Room() {
     inQ.current = [];
     canWrite.current = false;
     rx.current = null;
+    sendChain.current = Promise.resolve();
   }, []);
   useEffect(() => cleanup, [cleanup]);
 
@@ -84,6 +98,7 @@ export default function Room() {
     setExpires(null);
     setMsgs([]);
     setItems([]);
+    setShowQr(false);
     roomExp.current = null;
     codeRef.current = '';
   }
@@ -91,6 +106,22 @@ export default function Room() {
     cleanup();
     resetUi();
   }
+
+  // A scanned room QR / shared link: fill the code and join as soon as the human check passes.
+  useEffect(() => {
+    if (!pending.room) return;
+    setJoin(pending.room);
+    setAutoJoin(true);
+    notify('Room ' + pending.room + ' found. Joining as soon as the check passes.');
+    clearPending('room');
+  }, [pending.room]);
+
+  useEffect(() => {
+    if (autoJoin && join.length === 6 && human.ready && !busy && status === 'idle') {
+      setAutoJoin(false);
+      joinRoom(join);
+    }
+  }, [autoJoin, join, human.ready, busy, status]);
 
   // Friends + invites are member-only data. Guests never query them.
   useEffect(() => {
@@ -121,7 +152,7 @@ export default function Room() {
     };
   }, [user.uid, isGuest]);
 
-  // Chat is member-only. This also attaches automatically if a guest upgrades while already in a room.
+  // Chat is member-only. Attaches automatically if a guest upgrades while already in a room.
   useEffect(() => {
     if (isGuest || !code) return;
     return onSnapshot(
@@ -163,7 +194,10 @@ export default function Room() {
   function bind(ch: RTCDataChannel) {
     dc.current = ch;
     ch.binaryType = 'arraybuffer';
-    ch.onopen = () => setStatus('connected');
+    ch.onopen = () => {
+      setStatus('connected');
+      setShowQr(false);
+    };
     ch.onclose = () => setStatus((s) => (s === 'idle' ? s : 'closed'));
     ch.onmessage = onData;
   }
@@ -236,6 +270,7 @@ export default function Room() {
         setExpires(exp);
         setCode(c);
         setStatus('waiting');
+        setShowQr(true);
         watch(c, true);
         openWrites(c);
         return;
@@ -291,7 +326,7 @@ export default function Room() {
       const m = JSON.parse(ev.data);
       if (m.t === 'meta') {
         if (isBlocked(String(m.name), blockedRef.current) || m.size > MAX_P2P_BYTES) {
-          dc.current?.send(JSON.stringify({ t: 'reject' }));
+          dc.current?.send(JSON.stringify({ t: 'reject', fid: m.fid }));
           notify('Blocked an incoming file: ' + m.name, 'err');
           return;
         }
@@ -308,9 +343,9 @@ export default function Room() {
         logTransfer(user.uid, 'p2p', blob.size, extOf(String(r.meta.name)), ok ? 'verified' : 'mismatch');
         if (!ok) notify('Checksum mismatch on ' + r.meta.name + '. File discarded.', 'err');
       } else if (m.t === 'reject') {
-        abortSend.current = true;
-        notify('The other side blocked that file type.', 'err');
-        setItems((a) => a.map((x) => (x.dir === 'out' && x.state === 'active' ? { ...x, state: 'rejected' } : x)));
+        abortIds.current.add(m.fid);
+        notify('The other side blocked a file.', 'err');
+        setItems((a) => a.map((x) => (x.id === m.fid ? { ...x, state: 'rejected' } : x)));
       }
     } else if (rx.current) {
       const r = rx.current;
@@ -322,34 +357,56 @@ export default function Room() {
     }
   }
 
-  async function sendFile(f: File) {
-    const ch = dc.current;
-    if (!ch || ch.readyState !== 'open') return notify('Not connected yet.', 'err');
-    if (isBlocked(f.name, settings.blockedExtensions)) return notify('That file type is blocked.', 'err');
-    if (f.size > MAX_P2P_BYTES) return notify('Max 256 MiB per file.', 'err');
-    const id = nextId.current++;
-    abortSend.current = false;
-    setItems((a) => [{ id, dir: 'out', name: f.name, size: f.size, done: 0, state: 'active' }, ...a]);
+  async function sendOne(ch: RTCDataChannel, f: File, id: number) {
+    const mark = (state: Item['state'], done?: number) =>
+      setItems((a) => a.map((x) => (x.id === id ? { ...x, state, done: done ?? x.done } : x)));
+    if (isBlocked(f.name, settings.blockedExtensions)) {
+      notify(f.name + ': that file type is blocked.', 'err');
+      return mark('rejected');
+    }
+    if (f.size > MAX_P2P_BYTES) {
+      notify(f.name + ' is over 256 MiB.', 'err');
+      return mark('rejected');
+    }
+    mark('active');
     try {
       const hash = await sha256Hex(await f.arrayBuffer());
-      ch.send(JSON.stringify({ t: 'meta', name: f.name.slice(0, 200), size: f.size, mime: f.type, sha256: hash }));
+      ch.send(JSON.stringify({ t: 'meta', fid: id, name: f.name.slice(0, 200), size: f.size, mime: f.type, sha256: hash }));
       let n = 0;
       for (let o = 0; o < f.size; o += CHUNK) {
-        if (abortSend.current) return;
+        if (abortIds.current.has(id)) return;
         while (ch.bufferedAmount > 1 << 20) await new Promise((r) => setTimeout(r, 25));
         ch.send(await f.slice(o, o + CHUNK).arrayBuffer());
-        if (++n % 16 === 0) {
-          const d = Math.min(o + CHUNK, f.size);
-          setItems((a) => a.map((x) => (x.id === id ? { ...x, done: d } : x)));
-        }
+        if (++n % 16 === 0) mark('active', Math.min(o + CHUNK, f.size));
       }
       ch.send(JSON.stringify({ t: 'end' }));
-      setItems((a) => a.map((x) => (x.id === id ? { ...x, done: f.size, state: 'sent' } : x)));
+      mark('sent', f.size);
       logTransfer(user.uid, 'p2p', f.size, extOf(f.name), 'unchecked');
     } catch (e: any) {
       notify('Send failed: ' + (e?.message || 'connection closed'), 'err');
-      setItems((a) => a.map((x) => (x.id === id ? { ...x, state: 'rejected' } : x)));
+      mark('rejected');
     }
+  }
+
+  /** Queues files. Batches are chained so only one file is ever on the wire at a time. */
+  function sendFiles(files: File[]) {
+    const ch = dc.current;
+    if (!ch || ch.readyState !== 'open') return notify('Not connected yet.', 'err');
+    if (files.length === 0) return;
+    const batch = files.map((f) => ({ f, id: nextId.current++ }));
+    setItems((a) => [
+      ...batch.map((b) => ({ id: b.id, dir: 'out', name: b.f.name, size: b.f.size, done: 0, state: 'queued' }) as Item),
+      ...a,
+    ]);
+    sendChain.current = sendChain.current.then(async () => {
+      for (const b of batch) {
+        if (ch.readyState !== 'open') {
+          setItems((a) => a.map((x) => (x.id === b.id ? { ...x, state: 'rejected' } : x)));
+          continue;
+        }
+        await sendOne(ch, b.f, b.id);
+      }
+    });
   }
 
   async function sendMsg() {
@@ -385,7 +442,12 @@ export default function Room() {
     }
   }
 
+  const outs = items.filter((i) => i.dir === 'out');
+  const outLive = outs.filter((i) => i.state === 'queued' || i.state === 'active');
+  const outBytes = outs.reduce((n, i) => n + i.size, 0);
+  const outDone = outs.reduce((n, i) => n + (i.state === 'sent' ? i.size : i.done), 0);
   const live = status !== 'idle';
+
   return (
     <div className="panel">
       <div className="ph">
@@ -395,7 +457,7 @@ export default function Room() {
 
       {!live && (
         <div className="stack">
-          <p className="muted">Direct browser-to-browser transfer. One side creates a room, the other enters the code.</p>
+          <p className="muted">Direct browser-to-browser transfer. One side creates a room, the other enters the code or scans its QR.</p>
           {human.widget}
           <button className="btn primary" disabled={busy || !human.ready} onClick={create}>
             Create room
@@ -405,7 +467,11 @@ export default function Room() {
             <button className="btn" disabled={busy || join.length !== 6 || !human.ready} onClick={() => joinRoom(join)}>
               Join
             </button>
+            <button className="btn" onClick={() => setScan(true)}>
+              Scan
+            </button>
           </div>
+          {autoJoin && <p className="muted small">Code {join} ready. Joining as soon as the check passes.</p>}
           {invites.length > 0 && (
             <div className="list">
               {invites.map((i) => (
@@ -431,13 +497,18 @@ export default function Room() {
               <div className="code mono">{code}</div>
               <div className="muted small">Expires {expires?.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
             </div>
-            <button className="btn ghost sq" aria-label="Copy room code" onClick={() => navigator.clipboard.writeText(code).then(() => notify('Code copied.'))}>
+            <button className="btn ghost sq" aria-label="Copy room link" title="Copy room link" onClick={() => navigator.clipboard.writeText(roomLink(code)).then(() => notify('Room link copied.')).catch(() => notify('Clipboard blocked.', 'err'))}>
               <Icon name="copy" />
+            </button>
+            <button className="btn" onClick={() => setShowQr((v) => !v)} aria-expanded={showQr}>
+              QR
             </button>
             <button className="btn" onClick={leave}>
               Leave
             </button>
           </div>
+
+          {showQr && <QRBox value={roomLink(code)} label={'Scan to join room ' + code} />}
 
           {friends.length > 0 && (
             <div className="row">
@@ -457,42 +528,61 @@ export default function Room() {
 
           <label className={'drop' + (status !== 'connected' ? ' off' : '')}>
             <Icon name="file" size={18} />
-            <span>{status === 'connected' ? 'Choose a file to send' : 'File sending unlocks when connected'}</span>
+            <span>{status === 'connected' ? 'Choose files to send (select several to queue them)' : 'File sending unlocks when connected'}</span>
             <input
               type="file"
+              multiple
               disabled={status !== 'connected'}
               onChange={(e) => {
-                const f = e.target.files?.[0];
+                const fl = Array.from(e.target.files || []);
                 e.target.value = '';
-                if (f) sendFile(f);
+                sendFiles(fl);
               }}
             />
           </label>
 
-          {items.length > 0 && (
-            <div className="list">
-              {items.map((it) => (
-                <div className="card" key={it.id}>
-                  <div className="row">
-                    <div className="grow clip">
-                      <b>{it.name}</b>
-                      <div className="muted small">
-                        {it.dir === 'in' ? 'Receiving' : 'Sending'} · {fmtSize(it.size)}
-                      </div>
-                    </div>
-                    <span className={'badge ' + (it.state === 'verified' || it.state === 'sent' ? 'ok' : it.state === 'active' ? 'warn' : 'err')}>
-                      {it.state === 'verified' ? 'Verified' : it.state === 'sent' ? 'Sent' : it.state === 'active' ? 'In progress' : it.state === 'mismatch' ? 'Checksum mismatch' : 'Stopped'}
-                    </span>
-                    {it.blob && (
-                      <button className="btn" onClick={() => saveBlob(it.blob!, it.name)}>
-                        Save
-                      </button>
-                    )}
-                  </div>
-                  {it.state === 'active' && <progress max={Math.max(it.size, 1)} value={it.done} />}
-                </div>
-              ))}
+          {outLive.length > 0 && (
+            <div className="stack" style={{ gap: 6 }}>
+              <div className="qsum">
+                <span>
+                  Sending file {outs.length - outLive.length + 1} of {outs.length}
+                </span>
+                <span className="pct">{Math.round((outDone / Math.max(outBytes, 1)) * 100)}%</span>
+              </div>
+              <progress max={Math.max(outBytes, 1)} value={outDone} style={{ marginTop: 0 }} />
             </div>
+          )}
+
+          {items.length > 0 && (
+            <>
+              <div className="list">
+                {items.map((it) => (
+                  <div className="card" key={it.id}>
+                    <div className="row">
+                      <div className="grow clip">
+                        <b>{it.name}</b>
+                        <div className="muted small">
+                          {it.dir === 'in' ? 'Receiving' : 'Sending'} · {fmtSize(it.size)}
+                          {it.state === 'active' && <span className="pct"> · {Math.round((it.done / Math.max(it.size, 1)) * 100)}%</span>}
+                        </div>
+                      </div>
+                      <span className={'badge ' + (it.state === 'verified' || it.state === 'sent' ? 'ok' : it.state === 'active' ? 'warn' : it.state === 'queued' ? '' : 'err')}>{STATE_TEXT[it.state]}</span>
+                      {it.blob && (
+                        <button className="btn" onClick={() => saveBlob(it.blob!, it.name)}>
+                          Save
+                        </button>
+                      )}
+                    </div>
+                    {it.state === 'active' && <progress max={Math.max(it.size, 1)} value={it.done} />}
+                  </div>
+                ))}
+              </div>
+              {outLive.length === 0 && items.every((i) => i.state !== 'active') && (
+                <button className="btn ghost sm" style={{ alignSelf: 'flex-start' }} onClick={() => setItems((a) => a.filter((i) => i.blob))}>
+                  Clear finished
+                </button>
+              )}
+            </>
           )}
 
           {isGuest ? (
@@ -524,6 +614,20 @@ export default function Room() {
             </>
           )}
         </div>
+      )}
+
+      {scan && (
+        <ScanDialog
+          title="Scan a room QR"
+          hint="Point the camera at the QR on the other device."
+          placeholder="6-digit room code"
+          parse={parseRoomCode}
+          onResult={(c) => {
+            setJoin(c);
+            setAutoJoin(true);
+          }}
+          onClose={() => setScan(false)}
+        />
       )}
     </div>
   );
