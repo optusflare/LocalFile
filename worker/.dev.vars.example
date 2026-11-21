@@ -1,0 +1,4 @@
+# Local dev secrets for `wrangler dev`. Copy to .dev.vars (git-ignored). Never commit real values.
+TURNSTILE_SECRET=
+THREAT_API_KEY=
+ALERT_SINK_TOKEN=
