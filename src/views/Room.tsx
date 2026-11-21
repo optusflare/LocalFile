@@ -36,7 +36,7 @@ const STATUS_TEXT: Record<Status, string> = {
 };
 
 export default function Room() {
-  const { user, settings, notify } = useApp();
+  const { user, settings, notify, isGuest, signInGoogle } = useApp();
   const human = useTurnstile(settings);
   const [status, setStatus] = useState<Status>('idle');
   const [code, setCode] = useState('');
@@ -92,7 +92,13 @@ export default function Room() {
     resetUi();
   }
 
+  // Friends + invites are member-only data. Guests never query them.
   useEffect(() => {
+    if (isGuest) {
+      setFriends([]);
+      setInvites([]);
+      return;
+    }
     const u1 = onSnapshot(
       query(collection(db, 'friendships'), where('members', 'array-contains', user.uid)),
       (s) => setFriends(s.docs.map((d) => ((d.data().members as string[]) || []).find((m) => m !== user.uid) || '').filter(Boolean)),
@@ -113,7 +119,17 @@ export default function Room() {
       u1();
       u2();
     };
-  }, [user.uid]);
+  }, [user.uid, isGuest]);
+
+  // Chat is member-only. This also attaches automatically if a guest upgrades while already in a room.
+  useEffect(() => {
+    if (isGuest || !code) return;
+    return onSnapshot(
+      query(collection(db, 'rooms', code, 'messages'), orderBy('createdAt')),
+      (s) => setMsgs(s.docs.map((d) => ({ id: d.id, from: d.data().from, text: d.data().text }))),
+      () => {}
+    );
+  }, [isGuest, code]);
 
   function pushCand(c: string, cand: RTCIceCandidate) {
     addDoc(collection(db, 'rooms', c, 'candidates'), {
@@ -166,13 +182,6 @@ export default function Room() {
             if (p.remoteDescription) p.addIceCandidate(init).catch(() => {});
             else inQ.current.push(init);
           }),
-        () => {}
-      )
-    );
-    unsubs.current.push(
-      onSnapshot(
-        query(collection(db, 'rooms', c, 'messages'), orderBy('createdAt')),
-        (s) => setMsgs(s.docs.map((d) => ({ id: d.id, from: d.data().from, text: d.data().text }))),
         () => {}
       )
     );
@@ -344,6 +353,7 @@ export default function Room() {
   }
 
   async function sendMsg() {
+    if (isGuest) return signInGoogle();
     const t = text.trim();
     if (!t || !roomExp.current) return;
     try {
@@ -485,20 +495,34 @@ export default function Room() {
             </div>
           )}
 
-          <div className="chat" aria-label="Room chat">
-            {msgs.length === 0 && <span className="muted small">No messages yet.</span>}
-            {msgs.map((m) => (
-              <div key={m.id} className={m.from === user.uid ? 'mine' : ''}>
-                <span className="muted small">{m.from === user.uid ? 'You' : labelOf(m.from)}</span> {m.text}
+          {isGuest ? (
+            <div className="card row">
+              <div className="grow">
+                <b>Chat is for members</b>
+                <div className="muted small">Sign in with Google to message in this room. Your room stays open.</div>
               </div>
-            ))}
-          </div>
-          <div className="row">
-            <input aria-label="Message" maxLength={500} placeholder="Message" value={text} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && sendMsg()} />
-            <button className="btn sq" aria-label="Send message" disabled={!text.trim()} onClick={sendMsg}>
-              <Icon name="send" />
-            </button>
-          </div>
+              <button className="btn primary" onClick={signInGoogle}>
+                Sign in
+              </button>
+            </div>
+          ) : (
+            <>
+              <div className="chat" aria-label="Room chat">
+                {msgs.length === 0 && <span className="muted small">No messages yet.</span>}
+                {msgs.map((m) => (
+                  <div key={m.id} className={m.from === user.uid ? 'mine' : ''}>
+                    <span className="muted small">{m.from === user.uid ? 'You' : labelOf(m.from)}</span> {m.text}
+                  </div>
+                ))}
+              </div>
+              <div className="row">
+                <input aria-label="Message" maxLength={500} placeholder="Message" value={text} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && sendMsg()} />
+                <button className="btn sq" aria-label="Send message" disabled={!text.trim()} onClick={sendMsg}>
+                  <Icon name="send" />
+                </button>
+              </div>
+            </>
+          )}
         </div>
       )}
     </div>
