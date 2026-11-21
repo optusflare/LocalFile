@@ -1,0 +1,10 @@
+{
+  "redirects": [
+    {
+      "source": "/(.*)",
+      "has": [{ "type": "host", "value": "wildrop.vercel.app" }],
+      "destination": "https://aydrop.vercel.app/$1",
+      "permanent": true
+    }
+  ]
+}
