@@ -25,7 +25,11 @@ export interface Ctx {
   profile: Profile;
   settings: Settings;
   isAdmin: boolean;
+  /** true for anonymous guest sessions: transfers only, no chat/friends/feedback */
+  isGuest: boolean;
   notify: (msg: string, kind?: 'ok' | 'err') => void;
+  /** Upgrades a guest to a Google account (keeps the same uid), or signs in normally */
+  signInGoogle: () => void;
 }
 export const AppCtx = createContext<Ctx | null>(null);
 export function useApp(): Ctx {
