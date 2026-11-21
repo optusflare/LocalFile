@@ -1,0 +1,9 @@
+name = "manusai-security"
+main = "src/index.ts"
+compatibility_date = "2026-01-01"
+
+[vars]
+ALLOWED_ORIGINS = "https://yourapp.onrender.com"
+# THREAT_API_URL = ""   # optional provider adapter
+# ALERT_SINK_URL = ""   # optional trusted sink
+# Secrets are set with: wrangler secret put TURNSTILE_SECRET (and THREAT_API_KEY, ALERT_SINK_TOKEN)
