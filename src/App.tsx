@@ -1,9 +1,18 @@
 import { useCallback, useEffect, useState } from 'react';
-import { onAuthStateChanged, signInWithPopup, signInWithRedirect, signOut } from 'firebase/auth';
+import {
+  GoogleAuthProvider,
+  linkWithPopup,
+  onAuthStateChanged,
+  signInAnonymously,
+  signInWithCredential,
+  signInWithPopup,
+  signInWithRedirect,
+  signOut,
+} from 'firebase/auth';
 import type { User } from 'firebase/auth';
 import { doc, getDoc, onSnapshot, runTransaction, serverTimestamp } from 'firebase/firestore';
 import { auth, db, google } from './lib/firebase';
-import { AppCtx, DEFAULT_SETTINGS } from './lib/ctx';
+import { AppCtx, DEFAULT_SETTINGS, useApp } from './lib/ctx';
 import type { Profile, Settings } from './lib/ctx';
 import { OWNER_UID, randomFriendId } from './lib/util';
 import Icon, { Logo } from './components/Icon';
@@ -11,6 +20,7 @@ import Transfer from './views/Transfer';
 import Friends from './views/Friends';
 import Feedback from './views/Feedback';
 import Admin from './views/Admin';
+import './home.css';
 
 type View = 'transfer' | 'friends' | 'feedback' | 'admin';
 interface Toast {
@@ -18,6 +28,8 @@ interface Toast {
   msg: string;
   kind: 'ok' | 'err';
 }
+
+const GUEST_PROFILE: Profile = { friendId: '', displayName: 'Guest' };
 
 /** Allocates an 8-char friend ID. friendIds docs are create-only, so a taken ID is detected first and retried. */
 async function createProfile(user: User): Promise<Profile> {
@@ -41,21 +53,28 @@ async function createProfile(user: User): Promise<Profile> {
   throw last || new Error('Could not allocate a friend ID');
 }
 
-async function signIn(notify: (m: string, k?: 'ok' | 'err') => void) {
-  try {
-    await signInWithPopup(auth, google);
-  } catch (e: any) {
-    const c = e?.code as string | undefined;
-    if (c === 'auth/popup-blocked' || c === 'auth/operation-not-supported-in-this-environment') {
-      await signInWithRedirect(auth, google);
-    } else if (c !== 'auth/popup-closed-by-user' && c !== 'auth/cancelled-popup-request') {
-      notify('Sign-in failed (' + (c || e?.message) + '). If this is a new domain, add it to Firebase Auth authorized domains.', 'err');
-    }
-  }
+/** Shown in place of a member-only view when a guest opens it. */
+function MemberGate({ what, why }: { what: string; why: string }) {
+  const { signInGoogle } = useApp();
+  return (
+    <div className="panel narrow">
+      <div className="ph">
+        <h2>{what}</h2>
+        <span className="badge">Members</span>
+      </div>
+      <div className="stack">
+        <p className="muted">{why}</p>
+        <button className="btn primary" onClick={signInGoogle}>
+          Sign in with Google
+        </button>
+      </div>
+    </div>
+  );
 }
 
 export default function App() {
   const [user, setUser] = useState<User | null | undefined>(undefined);
+  const [rev, setRev] = useState(0); // bumped after a guest is upgraded in place (same User object)
   const [profile, setProfile] = useState<Profile | null>(null);
   const [profileErr, setProfileErr] = useState('');
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
@@ -89,10 +108,15 @@ export default function App() {
     []
   );
 
+  // Profile: guests have none (no users/friendIds docs). Members get one created on first sign-in.
   useEffect(() => {
     if (!user) {
       setProfile(null);
       setProfileErr('');
+      return;
+    }
+    if (user.isAnonymous) {
+      setProfile(GUEST_PROFILE);
       return;
     }
     let dead = false;
@@ -110,7 +134,52 @@ export default function App() {
     return () => {
       dead = true;
     };
-  }, [user]);
+  }, [user, rev]);
+
+  const signInGoogle = useCallback(async () => {
+    const cur = auth.currentUser;
+    try {
+      if (cur && cur.isAnonymous) {
+        // Upgrade in place: same uid, so a live room and the user's drops survive.
+        await linkWithPopup(cur, google);
+        await cur.reload();
+        await cur.getIdToken(true); // refresh claims so rules see a non-anonymous provider
+        setRev((r) => r + 1);
+      } else {
+        await signInWithPopup(auth, google);
+      }
+    } catch (e: any) {
+      const c = e?.code as string | undefined;
+      if (c === 'auth/credential-already-in-use') {
+        // That Google account already exists: switch to it (guest session is dropped).
+        const cred = GoogleAuthProvider.credentialFromError(e);
+        if (cred) {
+          try {
+            await signInWithCredential(auth, cred);
+          } catch (e2: any) {
+            notify('Sign-in failed (' + (e2?.code || e2?.message) + ').', 'err');
+          }
+        }
+      } else if (c === 'auth/popup-blocked' || c === 'auth/operation-not-supported-in-this-environment') {
+        await signInWithRedirect(auth, google);
+      } else if (c !== 'auth/popup-closed-by-user' && c !== 'auth/cancelled-popup-request') {
+        notify('Sign-in failed (' + (c || e?.message) + '). If this is a new domain, add it to Firebase Auth authorized domains.', 'err');
+      }
+    }
+  }, [notify]);
+
+  async function continueAsGuest() {
+    try {
+      await signInAnonymously(auth);
+    } catch (e: any) {
+      notify(
+        e?.code === 'auth/admin-restricted-operation'
+          ? 'Guest mode is off. Enable Anonymous sign-in in Firebase Authentication.'
+          : 'Could not start a guest session: ' + (e?.code || e?.message),
+        'err'
+      );
+    }
+  }
 
   const toastEls = (
     <div className="toasts" role="status" aria-live="polite">
@@ -124,6 +193,7 @@ export default function App() {
 
   if (user === undefined) return <div className="center muted">Loading…</div>;
 
+  // ---------- Home ----------
   if (user === null) {
     return (
       <>
@@ -135,19 +205,24 @@ export default function App() {
               <span>AyDrop</span>
             </div>
             <h1>Send a file to another device.</h1>
-            <p>
-              Open a room and transfer straight between two browsers, or leave a drop that waits for the other person for up to 24 hours.
-            </p>
-            <button className="btn primary" onClick={() => signIn(notify)}>
-              Continue with Google
-            </button>
+            <p>Open a room and transfer straight between two browsers, or leave a drop that waits for up to 24 hours.</p>
+            <div className="home-actions">
+              <button className="btn light" onClick={() => signInGoogle()}>
+                Continue with Google
+              </button>
+              <div className="home-note">Chat, friends, invites, feedback and drops to your other devices.</div>
+              <button className="btn dark" onClick={continueAsGuest}>
+                Continue as Guest
+              </button>
+              <div className="home-note">Rooms and file transfer, no account. Chat and friends need Google sign-in.</div>
+            </div>
             <dl className="facts">
               <dt>Room</dt>
-              <dd>Six-digit code, direct WebRTC transfer, live chat.</dd>
+              <dd>Six-digit code, direct WebRTC transfer.</dd>
               <dt>Drop</dt>
               <dd>Text or a file up to 522 KiB. SHA-256 checked on arrival.</dd>
               <dt>Friends</dt>
-              <dd>Add someone by their 8-character ID, then invite or drop to them.</dd>
+              <dd>Add someone by their 8-character ID. Members only.</dd>
             </dl>
           </div>
         </div>
@@ -173,16 +248,17 @@ export default function App() {
     );
   }
 
-  const isAdmin = user.uid === OWNER_UID;
-  const tabs: { id: View; label: string; icon: string }[] = [
+  const isGuest = user.isAnonymous;
+  const isAdmin = !isGuest && user.uid === OWNER_UID;
+  const tabs: { id: View; label: string; icon: string; members?: boolean }[] = [
     { id: 'transfer', label: 'Transfer', icon: 'drop' },
-    { id: 'friends', label: 'Friends', icon: 'friends' },
-    { id: 'feedback', label: 'Feedback', icon: 'feedback' },
+    { id: 'friends', label: 'Friends', icon: 'friends', members: true },
+    { id: 'feedback', label: 'Feedback', icon: 'feedback', members: true },
   ];
   if (isAdmin) tabs.push({ id: 'admin', label: 'Admin', icon: 'admin' });
 
   return (
-    <AppCtx.Provider value={{ user, profile, settings, isAdmin, notify }}>
+    <AppCtx.Provider value={{ user, profile, settings, isAdmin, isGuest, notify, signInGoogle }}>
       <div className="app">
         <aside className="rail">
           <div className="brand">
@@ -194,15 +270,21 @@ export default function App() {
               <button key={t.id} className={'nav' + (view === t.id ? ' on' : '')} aria-current={view === t.id ? 'page' : undefined} onClick={() => setView(t.id)}>
                 <Icon name={t.icon} size={18} />
                 <span>{t.label}</span>
+                {isGuest && t.members && <span className="tag">Members</span>}
               </button>
             ))}
           </nav>
           <div className="me">
             <div className="who">
-              <b>{profile.displayName || 'You'}</b>
-              <span className="mono muted">{profile.friendId}</span>
+              <b>{isGuest ? 'Guest' : profile.displayName || 'You'}</b>
+              <span className="mono muted">{isGuest ? 'no account' : profile.friendId}</span>
             </div>
-            <button className="btn ghost sq" onClick={() => signOut(auth)} aria-label="Sign out" title="Sign out">
+            {isGuest && (
+              <button className="btn sm" onClick={signInGoogle}>
+                Sign in
+              </button>
+            )}
+            <button className="btn ghost sq" onClick={() => signOut(auth)} aria-label={isGuest ? 'Exit guest session' : 'Sign out'} title={isGuest ? 'Exit guest session' : 'Sign out'}>
               <Icon name="out" />
             </button>
           </div>
@@ -214,10 +296,10 @@ export default function App() {
             <Transfer />
           </section>
           <section hidden={view !== 'friends'}>
-            <Friends />
+            {isGuest ? <MemberGate what="Friends" why="Adding friends and inviting them to rooms needs an account. Sign in with Google to get your friend ID." /> : <Friends />}
           </section>
           <section hidden={view !== 'feedback'}>
-            <Feedback />
+            {isGuest ? <MemberGate what="Feedback" why="Feedback is tied to an account so reports can be followed up and abuse can be traced. Sign in with Google to send one." /> : <Feedback />}
           </section>
           {isAdmin && view === 'admin' && (
             <section>
