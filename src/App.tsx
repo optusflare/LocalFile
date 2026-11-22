@@ -17,13 +17,15 @@ import type { Pending, Profile, Settings } from './lib/ctx';
 import { FID_RE, OWNER_UID, randomFriendId } from './lib/util';
 import Icon, { Logo } from './components/Icon';
 import AmbientBackground from './components/AmbientBackground';
+import MiniStatus from './components/MiniStatus';
 import Transfer from './views/Transfer';
 import Friends from './views/Friends';
 import Feedback from './views/Feedback';
+import Tools from './views/Tools';
 import Admin from './views/Admin';
 import './home.css';
 
-type View = 'transfer' | 'friends' | 'feedback' | 'admin';
+type View = 'transfer' | 'friends' | 'feedback' | 'tools' | 'admin';
 interface Toast {
   id: number;
   msg: string;
@@ -309,12 +311,13 @@ export default function App() {
 
   const isGuest = user.isAnonymous;
   const isAdmin = !isGuest && user.uid === OWNER_UID;
+  // Exactly four primary destinations on every screen size. Admin is reached from the sidebar (desktop) or from Tools (mobile).
   const tabs: { id: View; label: string; icon: string; members?: boolean }[] = [
     { id: 'transfer', label: 'Transfer', icon: 'drop' },
     { id: 'friends', label: 'Friends', icon: 'friends', members: true },
     { id: 'feedback', label: 'Feedback', icon: 'feedback', members: true },
+    { id: 'tools', label: 'Tools', icon: 'tools' },
   ];
-  if (isAdmin) tabs.push({ id: 'admin', label: 'Admin', icon: 'admin' });
 
   return (
     <AppCtx.Provider value={{ user, profile, settings, isAdmin, isGuest, notify, signInGoogle, pending, clearPending }}>
@@ -333,6 +336,13 @@ export default function App() {
               </button>
             ))}
           </nav>
+          <MiniStatus onOpen={() => setView('tools')} />
+          {isAdmin && (
+            <button className={'nav admin-link' + (view === 'admin' ? ' on' : '')} onClick={() => setView('admin')}>
+              <Icon name="admin" size={18} />
+              <span>Admin</span>
+            </button>
+          )}
           <div className="me">
             <div className="who">
               <b>{isGuest ? 'Guest' : profile.displayName || 'You'}</b>
@@ -350,7 +360,7 @@ export default function App() {
         </aside>
         <main>
           {settings.maintenanceBanner && <div className="banner">{settings.maintenanceBanner}</div>}
-          {/* Transfer stays mounted so a live room survives tab switches */}
+          {/* Transfer and Tools stay mounted so a live room and a running speed test survive tab switches */}
           <section hidden={view !== 'transfer'}>
             <Transfer />
           </section>
@@ -360,8 +370,14 @@ export default function App() {
           <section hidden={view !== 'feedback'}>
             {isGuest ? <MemberGate what="Feedback" why="Feedback is tied to an account so reports can be followed up and abuse can be traced. Sign in with Google to send one." /> : <Feedback />}
           </section>
+          <section hidden={view !== 'tools'}>
+            <Tools active={view === 'tools'} isAdmin={isAdmin} onOpenAdmin={() => setView('admin')} />
+          </section>
           {isAdmin && view === 'admin' && (
             <section>
+              <button className="btn ghost sm" style={{ marginBottom: 12 }} onClick={() => setView('tools')}>
+                ← Tools
+              </button>
               <Admin />
             </section>
           )}
