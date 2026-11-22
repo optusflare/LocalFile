@@ -16,6 +16,7 @@ import { AppCtx, DEFAULT_SETTINGS, useApp } from './lib/ctx';
 import type { Pending, Profile, Settings } from './lib/ctx';
 import { FID_RE, OWNER_UID, randomFriendId } from './lib/util';
 import Icon, { Logo } from './components/Icon';
+import AmbientBackground from './components/AmbientBackground';
 import Transfer from './views/Transfer';
 import Friends from './views/Friends';
 import Feedback from './views/Feedback';
@@ -224,7 +225,7 @@ export default function App() {
       <>
         {settings.maintenanceBanner && <div className="banner" style={{ margin: 16 }}>{settings.maintenanceBanner}</div>}
         <div className="home">
-          <div className="home-bg" aria-hidden="true" />
+          <AmbientBackground />
           <div className="home-wrap">
             <header className="home-head">
               <div className="brand">
