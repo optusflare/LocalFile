@@ -10,7 +10,6 @@
   },
   "dependencies": {
   "@vercel/analytics": "^1.5.0",
-  "fflate": "^0.8.2",
   "firebase": "^11.6.1",
   "html5-qrcode": "^2.3.8",
   "qrcode.react": "^4.2.0",
