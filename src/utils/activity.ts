@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from 'react';
 
-/** Tiny global flag: true while any transfer is hashing/streaming/verifying. Animations subscribe and stand down. */
+/** Tiny global flag: true while any transfer is hashing/streaming/verifying. Animations and the speed test subscribe. */
 let active = false;
 const subs = new Set<() => void>();
 
@@ -20,4 +20,13 @@ export function useTransferActive(): boolean {
     () => active,
     () => false
   );
+}
+
+/** Transfer ids that belong to the live room (open or finished-but-unsaved). Cache cleaners must never touch these. */
+let provider: () => Set<string> = () => new Set();
+export function registerProtected(fn: (() => Set<string>) | null) {
+  provider = fn || (() => new Set());
+}
+export function getProtectedTids(): Set<string> {
+  return provider();
 }
