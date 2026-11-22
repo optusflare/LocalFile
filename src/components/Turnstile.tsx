@@ -33,20 +33,27 @@ export function siteKeyFor(s: Settings): string {
 }
 
 export function useTurnstile(settings: Settings) {
-  const box = useRef<HTMLDivElement>(null);
+  // The container is tracked in state (callback ref) so the widget is re-rendered
+  // whenever its DOM node is re-created, instead of dying silently with the old node.
+  const [box, setBox] = useState<HTMLDivElement | null>(null);
   const wid = useRef<string | null>(null);
   const token = useRef('');
   const [ready, setReady] = useState(false);
   const key = siteKeyFor(settings);
 
   useEffect(() => {
+    if (!box) return;
     let dead = false;
+    token.current = '';
+    setReady(false);
     loadScript()
       .then(() => {
-        if (dead || !box.current || !window.turnstile) return;
-        wid.current = window.turnstile.render(box.current, {
+        if (dead || !window.turnstile) return;
+        wid.current = window.turnstile.render(box, {
           sitekey: key,
           theme: 'dark',
+          retry: 'auto',
+          'refresh-expired': 'auto',
           callback: (t: string) => {
             token.current = t;
             setReady(true);
@@ -55,16 +62,40 @@ export function useTurnstile(settings: Settings) {
             token.current = '';
             setReady(false);
           },
-          'error-callback': () => setReady(false),
+          'error-callback': () => {
+            token.current = '';
+            setReady(false);
+          },
         });
       })
       .catch(() => {});
     return () => {
       dead = true;
-      if (wid.current && window.turnstile) window.turnstile.remove(wid.current);
+      token.current = '';
+      setReady(false);
+      if (wid.current && window.turnstile) {
+        try {
+          window.turnstile.remove(wid.current);
+        } catch {
+          /* widget already gone */
+        }
+      }
       wid.current = null;
     };
-  }, [key]);
+  }, [box, key]);
+
+  /** Throws away the current token and asks Turnstile for a fresh one. */
+  const reset = useCallback(() => {
+    token.current = '';
+    setReady(false);
+    if (wid.current && window.turnstile) {
+      try {
+        window.turnstile.reset(wid.current);
+      } catch {
+        /* ignore */
+      }
+    }
+  }, []);
 
   /** Spends the one-time token. If a Worker URL is configured, the token is POSTed there for server-side verification. */
   const verify = useCallback(async (): Promise<boolean> => {
@@ -85,15 +116,15 @@ export function useTurnstile(settings: Settings) {
     } catch {
       return false;
     } finally {
-      if (wid.current && window.turnstile) window.turnstile.reset(wid.current);
+      reset(); // tokens are single-use: always fetch the next one
     }
-  }, [settings.workerUrl]);
+  }, [settings.workerUrl, reset]);
 
   const widget = (
     <div className="human">
-      <div ref={box} />
+      <div ref={setBox} />
       <span className={ready ? 'ok' : 'muted'}>{ready ? 'Check passed' : 'Complete the check to continue'}</span>
     </div>
   );
-  return { widget, verify, ready };
+  return { widget, verify, reset, ready };
 }
