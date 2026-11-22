@@ -11,7 +11,7 @@ import { labelOf, logTransfer, randomRoomCode } from '../lib/util';
 import { TransferEngine } from '../utils/transferEngine';
 import type { TItem } from '../utils/transferEngine';
 import { clearIncomplete, listPartial } from '../utils/transferLedger';
-import { setTransferActive } from '../utils/activity';
+import { registerProtected, setTransferActive } from '../utils/activity';
 
 type Status = 'idle' | 'waiting' | 'connecting' | 'connected' | 'reconnecting' | 'closed';
 type Tab = 'files' | 'chat' | 'share';
@@ -56,6 +56,8 @@ export default function Room() {
   const pc = useRef<RTCPeerConnection | null>(null);
   const dc = useRef<RTCDataChannel | null>(null);
   const engineRef = useRef<TransferEngine | null>(null);
+  const itemsRef = useRef<TItem[]>([]);
+  itemsRef.current = items;
   const unsubs = useRef<(() => void)[]>([]);
   const outQ = useRef<RTCIceCandidate[]>([]);
   const inQ = useRef<RTCIceCandidateInit[]>([]);
@@ -78,6 +80,12 @@ export default function Room() {
   useEffect(() => {
     void refreshIncomplete();
   }, [refreshIncomplete]);
+  // The Tools tab can clear the transfer cache; keep the "incomplete transfers" count honest.
+  useEffect(() => {
+    const f = () => void refreshIncomplete();
+    window.addEventListener('aydrop:cache-cleared', f);
+    return () => window.removeEventListener('aydrop:cache-cleared', f);
+  }, [refreshIncomplete]);
 
   const cleanup = useCallback(() => {
     unsubs.current.forEach((f) => f());
@@ -99,6 +107,7 @@ export default function Room() {
   useEffect(
     () => () => {
       engineRef.current?.dispose();
+      registerProtected(null);
       cleanup();
       setTransferActive(false);
     },
@@ -115,12 +124,26 @@ export default function Room() {
     codeRef.current = '';
     roleRef.current = null;
   }
-  function leave() {
-    engineRef.current?.dispose(); // unfinished incoming files stay on disk so a later room can resume them
+  /** Internal: tears down the connection and the transfer engine. Unfinished incoming files stay on disk for a later resume. */
+  function teardown() {
+    engineRef.current?.dispose();
     engineRef.current = null;
+    registerProtected(null);
     cleanup();
     resetUi();
     window.setTimeout(refreshIncomplete, 600);
+  }
+  /** User-facing Leave: back to a fully idle screen where Create / Join / Scan are usable straight away. */
+  function leave() {
+    teardown();
+    setBusy(false);
+    setAutoJoin(false);
+    setScan(false);
+    setJoin('');
+    setText('');
+    setInviteTo('');
+    setTab('files');
+    if (!human.ready) human.reset(); // make sure a fresh Turnstile token is on its way
   }
   function startEngine() {
     engineRef.current?.dispose();
@@ -132,6 +155,8 @@ export default function Room() {
       notify,
       log: (size, ext, integrity) => logTransfer(user.uid, 'p2p', size, ext, integrity),
     });
+    // Tools > "Clear cache" must never delete files that belong to this live room.
+    registerProtected(() => new Set([...(engineRef.current?.activeTids() ?? []), ...itemsRef.current.filter((i) => i.dir === 'in').map((i) => i.id)]));
   }
 
   // Keep the screen awake and quiet the ambient animation while a transfer is moving.
@@ -346,7 +371,7 @@ export default function Room() {
         notify('Finish the human check first.', 'err');
         return;
       }
-      leave();
+      teardown();
       startEngine();
       for (let i = 0; i < 5; i++) {
         const c = randomRoomCode();
@@ -374,9 +399,7 @@ export default function Room() {
         return;
       }
     } catch (e: any) {
-      engineRef.current?.dispose();
-      engineRef.current = null;
-      cleanup();
+      teardown(); // always land back on a clean idle screen
       notify('Could not create a room: ' + (e?.code || e?.message), 'err');
     } finally {
       setBusy(false);
@@ -392,7 +415,7 @@ export default function Room() {
         notify('Finish the human check first.', 'err');
         return;
       }
-      leave();
+      teardown();
       startEngine();
       const ref = doc(db, 'rooms', c);
       const s = await getDoc(ref);
@@ -419,9 +442,7 @@ export default function Room() {
       watch(c, false);
       openWrites(c);
     } catch (e: any) {
-      engineRef.current?.dispose();
-      engineRef.current = null;
-      cleanup();
+      teardown();
       notify(e?.code === 'permission-denied' ? 'Room is full or has expired.' : e?.message || 'Could not join.', 'err');
     } finally {
       setBusy(false);
@@ -477,10 +498,14 @@ export default function Room() {
         <span className={'badge ' + (status === 'connected' ? 'ok' : status === 'closed' ? 'err' : live ? 'warn' : '')}>{STATUS_TEXT[status]}</span>
       </div>
 
+      {!live && <p className="muted" style={{ marginBottom: 14 }}>Direct browser-to-browser transfer. One side creates a room, the other enters the code or scans its QR.</p>}
+
+      {/* Always mounted in the same spot: while a room is live it is only collapsed, so it keeps refreshing its
+          token and Create / Join / Scan work the moment you leave. */}
+      <div className={live ? 'human-park' : 'human-slot'}>{human.widget}</div>
+
       {!live && (
         <div className="stack">
-          <p className="muted">Direct browser-to-browser transfer. One side creates a room, the other enters the code or scans its QR.</p>
-          {human.widget}
           <button className="btn primary" disabled={busy || !human.ready} onClick={create}>
             Create room
           </button>
