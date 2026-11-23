@@ -145,6 +145,7 @@ export default function Tools({ active, isAdmin, onOpenAdmin, onOpenTransfer }: 
 
       {/* Network stays mounted so a running test survives tab switches */}
       <div hidden={sub !== 'net'} className="stack">
+        <OfflineCard onOpenTransfer={onOpenTransfer} />
         <div className="panel">
           <div className="ph">
             <h2>Your connection</h2>
