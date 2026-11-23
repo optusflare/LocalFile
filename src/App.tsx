@@ -213,6 +213,33 @@ export default function App() {
 
   // ---------- Home ----------
   if (user === null) {
+    if (offlineOnly) {
+  return (
+    <>
+      <div className="home">
+        <div className="home-wrap" style={{ minHeight: 0, gridTemplateColumns: 'minmax(0,560px)', justifyContent: 'center' }}>
+          <header className="home-head row">
+            <div className="brand">
+              <Logo size={28} />
+              <span>AyDrop</span>
+            </div>
+            <button className="btn ghost sm" style={{ marginLeft: 'auto' }} onClick={() => setOfflineOnly(false)}>
+              Back
+            </button>
+          </header>
+          <section className="panel">
+            <div className="ph">
+              <h2>Offline transfer</h2>
+              <span className="badge">No internet needed</span>
+            </div>
+            <OfflineTransfer blocked={settings.blockedExtensions} notify={notify} />
+          </section>
+        </div>
+      </div>
+      {toastEls}
+    </>
+  );
+}
     const guestPoints = [
       'Rooms: direct browser-to-browser, joined by a 6-digit code or a QR scan',
       'Queue several files at once, with live progress on each',
