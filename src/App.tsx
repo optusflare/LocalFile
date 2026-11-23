@@ -279,6 +279,10 @@ export default function App() {
                   Continue as Guest
                 </button>
                 <div className="home-note">Transfers only. You can sign in later without losing your room.</div>
+                <button className="btn outline" onClick={() => setOfflineOnly(true)}>
+  Offline transfer (no internet)
+</button>
+<div className="home-note">Pair two devices on the same Wi-Fi or hotspot with a QR code. Install the app to use it with no internet at all.</div>
               </div>
             </section>
 
