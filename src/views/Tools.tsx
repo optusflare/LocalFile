@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Icon from '../components/Icon';
 import SystemMonitor from '../components/SystemMonitor';
+import OfflineCard from '../components/OfflineCard';
 import { useTransferActive } from '../utils/activity';
 import { fetchMeta, fmtMbps, runSpeedTest, sendTime, setLastResult, useLastSpeed, verdict } from '../utils/speedTest';
 import type { Meta, Phase } from '../utils/speedTest';
