@@ -2,6 +2,7 @@ import { useRef, useState } from 'react';
 import Icon from './Icon';
 import { isJunk, zipFolder } from '../utils/zipFolder';
 import type { FolderItem } from '../utils/zipFolder';
+import { getControls } from '../utils/siteControls';
 
 interface Props {
   disabled?: boolean;
@@ -46,6 +47,20 @@ export default function Dropzone({ disabled, hint, onFiles, notify }: Props) {
   const dirRef = useRef<HTMLInputElement>(null);
   const canFolder = typeof window !== 'undefined' && window.matchMedia('(pointer: fine)').matches;
 
+  /** Applies the admin's per-file size limit before anything is queued. */
+  function deliver(files: File[]) {
+    const c = getControls();
+    const max = c.maxRoomFileMiB * 1024 * 1024;
+    const ok = files.filter((f) => f.size <= max);
+    if (ok.length < files.length) notify(files.length - ok.length + ' file(s) over the ' + c.maxRoomFileMiB + ' MiB limit were skipped.', 'err');
+    if (ok.length) onFiles(ok);
+  }
+  function zipAllowed(): boolean {
+    if (getControls().autoZipFolders) return true;
+    notify('Folder transfer is turned off by the site admin. Choose individual files.', 'err');
+    return false;
+  }
+
   async function bundle(name: string, items: FolderItem[]): Promise<File | null> {
     if (!items.length) {
       notify('"' + name + '" has no files.', 'err');
@@ -60,9 +75,9 @@ export default function Dropzone({ disabled, hint, onFiles, notify }: Props) {
     try {
       for (const en of entries) {
         if (en.isFile) {
-          const f = await new Promise<File>((res, rej) => (en as FileSystemFileEntry).file(res, rej));
-          out.push(f);
+          out.push(await new Promise<File>((res, rej) => (en as FileSystemFileEntry).file(res, rej)));
         } else if (en.isDirectory) {
+          if (!zipAllowed()) continue;
           setZip({ name: en.name, phase: 'scan', total: 0, done: 0 });
           const list: FolderItem[] = [];
           await walk(en, '', list);
@@ -75,14 +90,14 @@ export default function Dropzone({ disabled, hint, onFiles, notify }: Props) {
     } finally {
       setZip(null);
     }
-    if (out.length) onFiles(out);
+    if (out.length) deliver(out);
   }
 
   function onDrop(e: React.DragEvent) {
     e.preventDefault();
     setOver(false);
     if (disabled || zip) return;
-    // Entries must be grabbed synchronously: the DataTransfer is emptied after the event handler returns.
+    // Entries must be grabbed synchronously: the DataTransfer is emptied after the handler returns.
     const entries: FileSystemEntry[] = [];
     const loose: File[] = [];
     for (const item of Array.from(e.dataTransfer.items || [])) {
@@ -113,16 +128,18 @@ export default function Dropzone({ disabled, hint, onFiles, notify }: Props) {
       } else out.push(f);
     }
     try {
-      for (const [name, items] of folders) {
-        const z = await bundle(name, items);
-        if (z) out.push(z);
+      if (folders.size && zipAllowed()) {
+        for (const [name, items] of folders) {
+          const z = await bundle(name, items);
+          if (z) out.push(z);
+        }
       }
     } catch (e: any) {
       notify('Zipping failed: ' + (e?.message || 'unknown error'), 'err');
     } finally {
       setZip(null);
     }
-    if (out.length) onFiles(out);
+    if (out.length) deliver(out);
   }
 
   const busy = !!zip;
