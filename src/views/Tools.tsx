@@ -37,9 +37,10 @@ interface Props {
   active: boolean;
   isAdmin: boolean;
   onOpenAdmin: () => void;
+  onOpenTransfer?: () => void;
 }
 
-export default function Tools({ active, isAdmin, onOpenAdmin }: Props) {
+export default function Tools({ active, isAdmin, onOpenAdmin, onOpenTransfer }: Props) {
   const [sub, setSub] = useState<'net' | 'sys'>('net');
 
   // IP / location
