@@ -17,6 +17,7 @@ import type { Pending, Profile, Settings } from './lib/ctx';
 import { FID_RE, OWNER_UID, randomFriendId } from './lib/util';
 import Icon, { Logo } from './components/Icon';
 import AmbientBackground from './components/AmbientBackground';
+import OfflineTransfer from './components/OfflineTransfer';
 import MiniStatus from './components/MiniStatus';
 import Transfer from './views/Transfer';
 import Friends from './views/Friends';
