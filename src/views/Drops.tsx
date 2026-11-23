@@ -5,7 +5,8 @@ import { useApp } from '../lib/ctx';
 import { useTurnstile } from '../components/Turnstile';
 import Icon from '../components/Icon';
 import { QRBox } from '../components/QR';
-import { MAX_DROP_BYTES, extOf, fmtSize, fromB64, isBlocked, labelOf, logTransfer, saveBlob, sha256Hex, toB64 } from '../lib/util';
+import { extOf, fmtSize, fromB64, isBlocked, labelOf, logTransfer, saveBlob, sha256Hex, toB64 } from '../lib/util';
+import { useControls } from '../utils/siteControls';
 
 interface Drop {
   id: string;
@@ -37,6 +38,8 @@ function toDrops(docs: any[]): Drop[] {
 
 export default function Drops() {
   const { user, settings, notify } = useApp();
+  const ctl = useControls(); // admin-set size cap and lifetime
+  const maxBytes = ctl.maxDropKiB * 1024;
   const human = useTurnstile(settings);
   const [inbox, setInbox] = useState<Drop[]>([]);
   const [sent, setSent] = useState<Drop[]>([]);
@@ -100,7 +103,7 @@ export default function Drops() {
       data: toB64(bytes),
       kind,
       createdAt: serverTimestamp(),
-      expiresAt: Timestamp.fromMillis(Date.now() + 23 * 3600 * 1000),
+      expiresAt: Timestamp.fromMillis(Date.now() + ctl.dropTtlHours * 3600 * 1000),
     });
     logTransfer(user.uid, 'async', bytes.length, extOf(name), 'unchecked');
   }
@@ -112,7 +115,7 @@ export default function Drops() {
       if (mode === 'text') {
         const bytes = new TextEncoder().encode(text);
         if (!text.trim()) return notify('Write or paste something first.', 'err');
-        if (bytes.length > MAX_DROP_BYTES) return notify('Text is over 522 KiB.', 'err');
+        if (bytes.length > maxBytes) return notify('Text is over ' + ctl.maxDropKiB + ' KiB.', 'err');
         if (!(await human.verify())) return notify('Finish the human check first.', 'err');
         await putDrop('text', bytes, '', 'text/plain');
         notify(to === user.uid ? 'Saved to your own inbox.' : 'Sent to ' + labelOf(to) + '.');
@@ -129,7 +132,7 @@ export default function Drops() {
         const f = files[i];
         set(i, { state: 'sending' });
         try {
-          if (f.size > MAX_DROP_BYTES) throw new Error('Over 522 KiB. Use a room.');
+          if (f.size > maxBytes) throw new Error('Over ' + ctl.maxDropKiB + ' KiB. Use a room.');
           if (isBlocked(f.name, settings.blockedExtensions)) throw new Error('Blocked file type');
           await putDrop('file', new Uint8Array(await f.arrayBuffer()), f.name.slice(0, 200), (f.type || 'application/octet-stream').slice(0, 100));
           set(i, { state: 'sent' });
@@ -237,7 +240,9 @@ export default function Drops() {
     <div className="panel">
       <div className="ph">
         <h2>Drops</h2>
-        <span className="muted small">Up to 522 KiB each, kept 24 h</span>
+        <span className="muted small">
+          Up to {ctl.maxDropKiB} KiB each, kept {ctl.dropTtlHours} h
+        </span>
       </div>
       <div className="stack">
         <div className="seg" role="tablist">
@@ -261,7 +266,9 @@ export default function Drops() {
           <>
             <textarea rows={4} placeholder="Paste a link or a snippet" value={text} onChange={(e) => setText(e.target.value)} />
             <div className="row">
-              <div className={'grow small ' + (textBytes > MAX_DROP_BYTES ? 'err' : 'muted')}>{fmtSize(textBytes)} of 522 KiB</div>
+              <div className={'grow small ' + (textBytes > maxBytes ? 'err' : 'muted')}>
+                {fmtSize(textBytes)} of {ctl.maxDropKiB} KiB
+              </div>
               <button className="btn ghost sm" onClick={paste}>
                 Paste from clipboard
               </button>
@@ -289,7 +296,7 @@ export default function Drops() {
                     <span className="clip">
                       <b style={{ fontWeight: 500 }}>{f.name}</b>
                     </span>
-                    <span className={'small ' + (f.size > MAX_DROP_BYTES ? 'err' : 'muted')}>{f.size > MAX_DROP_BYTES ? 'Too big' : fmtSize(f.size)}</span>
+                    <span className={'small ' + (f.size > maxBytes ? 'err' : 'muted')}>{f.size > maxBytes ? 'Too big' : fmtSize(f.size)}</span>
                   </div>
                 ))}
               </div>
