@@ -404,7 +404,7 @@ export default function App() {
             {isGuest ? <MemberGate what="Feedback" why="Feedback is tied to an account so reports can be followed up and abuse can be traced. Sign in with Google to send one." /> : <Feedback />}
           </section>
           <section hidden={view !== 'tools'}>
-            <Tools active={view === 'tools'} isAdmin={isAdmin} onOpenAdmin={() => setView('admin')} />
+            <Tools active={view === 'tools'} isAdmin={isAdmin} onOpenAdmin={() => setView('admin')} onOpenTransfer={() => setView('transfer')} />
           </section>
           {isAdmin && view === 'admin' && (
             <section>
