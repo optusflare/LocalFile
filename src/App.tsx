@@ -96,6 +96,7 @@ export default function App() {
   const [view, setView] = useState<View>(INITIAL_LINK.friend ? 'friends' : 'transfer');
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [pending, setPending] = useState<Pending>(INITIAL_LINK);
+  const [offlineOnly, setOfflineOnly] = useState(false);
 
   const clearPending = useCallback((k: keyof Pending) => setPending((p) => ({ ...p, [k]: '' })), []);
 
